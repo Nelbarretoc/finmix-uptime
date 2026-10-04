@@ -1,0 +1,51 @@
+# Checks https://finmix.th3rdgroup.com from outside the VPS every 5 minutes.
+# Down (3 tries over a minute fail) → one "FinMix is down" issue, which
+# GitHub emails and pushes to the owner. Back up → the issue is closed.
+# The VPS runs the same check every minute; this one covers the VPS itself
+# being down. Scheduled runs can start a few minutes late.
+name: FinMix uptime
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the live site (3 tries over a minute)
+        id: probe
+        run: |
+          ok=false
+          for try in 1 2 3; do
+            if curl -fsS -m 15 https://finmix.th3rdgroup.com/api/health | grep -q '"status":"ok"'; then
+              ok=true; break
+            fi
+            sleep 20
+          done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+      - name: Open or close the outage issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OK: ${{ steps.probe.outputs.ok }}
+        run: |
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label outage --state open --json number -q '.[0].number')
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          if [ "$OK" = true ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" -R "$GITHUB_REPOSITORY" -c "✅ Back up at $now (seen from GitHub)."
+            fi
+          elif [ -z "$open" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --label outage \
+              --title "🔴 FinMix is down" \
+              --body "https://finmix.th3rdgroup.com did not answer three checks over a minute from GitHub at $now. This issue closes by itself when the site is back."
+          fi
